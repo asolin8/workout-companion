@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Habit Tracker</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.33.0/dist/tabler-icons.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+  :root {
+    --surface-0: #F7F6F2; --surface-1: #FFFFFF; --surface-2: #FBFAF7;
+    --text-primary: #1A1A18; --text-secondary: #5F5E5A; --text-muted: #888780;
+    --text-accent: #0C447C; --bg-accent: #E6F1FB; --border-accent: #378ADD;
+    --border: #D3D1C7; --border-strong: #B4B2A9; --radius: 8px;
+    --fill-success: #639922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--surface-0);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--text-primary); max-width: 480px; margin: 0 auto;
+  }
+  button {
+    font-family: inherit; border: 0.5px solid var(--border-strong);
+    background: var(--surface-1); border-radius: var(--radius);
+    padding: 6px 10px; cursor: pointer; color: var(--text-primary);
+  }
+  button:hover { background: var(--surface-2); }
+  input[type=number], input[type=email], input[type=password] {
+    font-family: inherit; border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius); padding: 4px 8px; background: var(--surface-1);
+    color: var(--text-primary);
+  }
+  #authScreen { display:flex; flex-direction:column; gap:10px; max-width:280px; margin: 80px auto; }
+  #authScreen input { padding:10px; font-size:14px; }
+  #authScreen button.primary { background: var(--text-accent); color:#fff; border-color: var(--text-accent); padding:10px; font-size:14px; }
+  #authError { color: #a3352f; font-size:13px; min-height:16px; }
+  #logoutRow { text-align:right; margin-bottom:8px; }
+  #logoutRow button { font-size:11px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<h2 style="font-size:11px; position:absolute; left:-9999px;">Daily habit tracker for wake time, morning routine, workout, meals, water, magnesium, and bedtime</h2>
+
+<div id="authScreen">
+  <div style="font-size:16px;font-weight:500;text-align:center;margin-bottom:6px;">Log in</div>
+  <input type="email" id="authEmail" placeholder="Email" />
+  <input type="password" id="authPassword" placeholder="Password" />
+  <button class="primary" id="loginBtn">Log in</button>
+  <button id="signupBtn">Create account</button>
+  <div id="authError"></div>
+</div>
+
+<div id="appScreen" style="display:none;">
+  <div id="logoutRow"><button id="logoutBtn">Log out</button></div>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+    <button id="prevDay" aria-label="Previous day" style="width:36px;"><i class="ti ti-chevron-left" aria-hidden="true"></i></button>
+    <div style="font-size:16px;font-weight:500;" id="dateLabel">Today</div>
+    <button id="nextDay" aria-label="Next day" style="width:36px;"><i class="ti ti-chevron-right" aria-hidden="true"></i></button>
+  </div>
+  <div id="rows" style="display:flex;flex-direction:column;gap:8px;"></div>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://fzcqmmshsrvuoxgfibpc.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_av5zRHJ8S3B1aiezJ4ZRcA_yWx-wxsG';
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const STORAGE_KEY_PREFIX = 'habit-tracker:';
+const WATER_GOAL = 75;
+function fmtDate(d){ return d.toISOString().slice(0,10); }
+function labelFor(d, todayStr){
+  const s = fmtDate(d);
+  if(s===todayStr) return 'Today';
+  return d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});
+}
+
+let current = new Date();
+current.setHours(0,0,0,0);
+const todayStr = fmtDate(current);
+
+const defaultEntry = () => ({ bedtime:null, wokeOnTime:false, am:false, workout:false, mag:false, meals:0, waterOz:0, bottleOz:32 });
+let entry = defaultEntry();
+
+async function loadEntry(dateStr){
+  try{
+    const { data, error } = await supabaseClient
+      .from('app_data')
+      .select('value')
+      .eq('key', STORAGE_KEY_PREFIX+dateStr)
+      .maybeSingle();
+    if(error || !data) return defaultEntry();
+    return Object.assign(defaultEntry(), JSON.parse(data.value));
+  }catch(e){ return defaultEntry(); }
+}
+async function saveEntry(dateStr, e){
+  try{
+    const { data: userData } = await supabaseClient.auth.getUser();
+    await supabaseClient.from('app_data').upsert({
+      user_id: userData.user.id,
+      key: STORAGE_KEY_PREFIX+dateStr,
+      value: JSON.stringify(e)
+    }, { onConflict: 'user_id,key' });
+  }catch(e){ console.error('Save error', e); }
+}
+
+function row(iconName, label, controlHtml){
+  return '<div style="display:flex;align-items:center;justify-content:space-between;background:var(--surface-2);border:0.5px solid var(--border);border-radius:var(--radius);padding:10px 12px;">'
+    + '<div style="display:flex;align-items:center;gap:8px;font-size:14px;"><i class="ti ti-'+iconName+'" style="font-size:18px;" aria-hidden="true"></i>'+label+'</div>'
+    + '<div>'+controlHtml+'</div></div>';
+}
+
+async function render(){
+  document.getElementById('dateLabel').textContent = labelFor(current, todayStr);
+  entry = await loadEntry(fmtDate(current));
+
+  const bedtimeOpts = ['on time','planned late','drift late'];
+  let bedtimeBtns = bedtimeOpts.map(o=>{
+    const active = entry.bedtime===o;
+    return '<button data-bedtime="'+o+'" style="font-size:12px;padding:4px 8px;'+(active?'background:var(--bg-accent);color:var(--text-accent);border-color:var(--border-accent);':'')+'">'+o+'</button>';
+  }).join('');
+
+  const mealBtns = [0,1,2,3].map(n=>{
+    const active = entry.meals===n;
+    return '<button data-meal="'+n+'" style="font-size:12px;width:28px;padding:4px 0;'+(active?'background:var(--bg-accent);color:var(--text-accent);border-color:var(--border-accent);':'')+'">'+n+'</button>';
+  }).join('');
+
+  document.getElementById('rows').innerHTML =
+    row('alarm','Woke up on time', '<button id="wokeBtn" aria-label="Toggle woke up on time" style="width:32px;">'+(entry.wokeOnTime?'<i class="ti ti-check" aria-hidden="true"></i>':'')+'</button>') +
+    row('sun','AM routine', '<button id="amBtn" aria-label="Toggle AM routine" style="width:32px;">'+(entry.am?'<i class="ti ti-check" aria-hidden="true"></i>':'')+'</button>') +
+    row('barbell','Workout', '<button id="wkBtn" aria-label="Toggle workout" style="width:32px;">'+(entry.workout?'<i class="ti ti-check" aria-hidden="true"></i>':'')+'</button>') +
+    row('soup','Meals', '<div style="display:flex;gap:4px;">'+mealBtns+'</div>') +
+    row('glass-full','Water ('+entry.waterOz+'/'+WATER_GOAL+' oz)',
+      '<div style="display:flex;align-items:center;gap:6px;">'
+      + '<input id="bottleSize" type="number" min="1" value="'+entry.bottleOz+'" style="width:56px;font-size:12px;" aria-label="Bottle size in ounces"/>'
+      + '<span style="font-size:11px;color:var(--text-muted);">oz/bottle</span>'
+      + '<button id="waterBtn" aria-label="Add bottle" style="width:32px;"><i class="ti ti-plus" aria-hidden="true"></i></button>'
+      + '</div>') +
+    row('pill','Magnesium', '<button id="mgBtn" aria-label="Toggle magnesium" style="width:32px;">'+(entry.mag?'<i class="ti ti-check" aria-hidden="true"></i>':'')+'</button>') +
+    row('moon','Bedtime', '<div style="display:flex;gap:4px;">'+bedtimeBtns+'</div>');
+
+  document.querySelectorAll('[data-bedtime]').forEach(b=>b.onclick=async()=>{
+    entry.bedtime = entry.bedtime===b.dataset.bedtime ? null : b.dataset.bedtime;
+    await saveEntry(fmtDate(current), entry); render();
+  });
+  document.querySelectorAll('[data-meal]').forEach(b=>b.onclick=async()=>{
+    entry.meals = Number(b.dataset.meal);
+    await saveEntry(fmtDate(current), entry); render();
+  });
+  document.getElementById('wokeBtn').onclick=async()=>{ entry.wokeOnTime=!entry.wokeOnTime; await saveEntry(fmtDate(current), entry); render(); };
+  document.getElementById('amBtn').onclick=async()=>{ entry.am=!entry.am; await saveEntry(fmtDate(current), entry); render(); };
+  document.getElementById('wkBtn').onclick=async()=>{ entry.workout=!entry.workout; await saveEntry(fmtDate(current), entry); render(); };
+  document.getElementById('mgBtn').onclick=async()=>{ entry.mag=!entry.mag; await saveEntry(fmtDate(current), entry); render(); };
+  document.getElementById('bottleSize').onchange=async(e)=>{ entry.bottleOz = Number(e.target.value)||32; await saveEntry(fmtDate(current), entry); };
+  document.getElementById('waterBtn').onclick=async()=>{ entry.waterOz += Number(entry.bottleOz)||32; await saveEntry(fmtDate(current), entry); render(); };
+}
+
+document.getElementById('prevDay').onclick=async()=>{ current.setDate(current.getDate()-1); await render(); };
+document.getElementById('nextDay').onclick=async()=>{
+  const next = new Date(current); next.setDate(next.getDate()+1);
+  if(next > new Date()) return;
+  current = next; await render();
+};
+
+function showApp(){
+  document.getElementById('authScreen').style.display = 'none';
+  document.getElementById('appScreen').style.display = '';
+  render();
+}
+function showAuth(){
+  document.getElementById('authScreen').style.display = '';
+  document.getElementById('appScreen').style.display = 'none';
+}
+
+document.getElementById('loginBtn').onclick = async () => {
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const errEl = document.getElementById('authError');
+  errEl.textContent = '';
+  const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+  if(error){ errEl.textContent = error.message; return; }
+  showApp();
+};
+document.getElementById('signupBtn').onclick = async () => {
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const errEl = document.getElementById('authError');
+  errEl.textContent = '';
+  const { error } = await supabaseClient.auth.signUp({ email, password });
+  if(error){ errEl.textContent = error.message; return; }
+  errEl.style.color = 'var(--fill-success)';
+  errEl.textContent = 'Account created! Check your email to confirm, then log in.';
+};
+document.getElementById('logoutBtn').onclick = async () => {
+  await supabaseClient.auth.signOut();
+  showAuth();
+};
+
+(async () => {
+  const { data } = await supabaseClient.auth.getSession();
+  if(data.session){ showApp(); } else { showAuth(); }
+})();
+</script>
+</body>
+</html>
